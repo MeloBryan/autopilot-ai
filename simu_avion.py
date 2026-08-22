@@ -18,21 +18,33 @@ class AvionEnv:
 		gravite = -9.81 / 10.0
 
 		self.vitesse_verticale += pousse + gravite
+		self.vitesse_verticale *= 0.9
 		self.altitude += self.vitesse_verticale
 		ecart = abs(self.altitude_cible - self.altitude)
-		recompense = -ecart
+		recompense = -ecart / 100.0
 		termine = self.altitude <= 0 or self.altitude> 10000.0
 		etat = np.array([self.altitude, self.vitesse_verticale])
 		return etat, recompense, termine
+
+def choisir_action(etat, altitude_cible):
+	altitude, vitesse = etat[0], etat[1]
+	ecart = altitude_cible - altitude
+	vitesse_cible = np.clip(ecart / 15.0, -15.0, 15.0)
+	if vitesse < vitesse_cible - 0.5:
+		return 2
+	elif vitesse > vitesse_cible + 0.5:
+		return 0
+	return 1
 
 env = AvionEnv(altitude_cible=3000.0)
 etat_actuel = env.reset()
 
 print("----BEGIN OF THE FLIGHT----")
-for seconde in range(10000):
-	action = np.random.choice([0, 1, 2])
+for seconde in range(150):
+	action = choisir_action(etat_actuel, env.altitude_cible)
 	nouvel_etat, recompense, termine = env.step(action)
-	print(f"t={seconde}s | Alt: {nouvel_etat[0]:.1f}m | Vitesse:{nouvel_etat[1]:.1f}m/s | Score: {recompense:.1f}")
+	etat_actuel = nouvel_etat
+	print(f"t={seconde:02d}s | Alt: {nouvel_etat[0]:.1f}m | Vitesse:{nouvel_etat[1]:.1f}m/s | Score: {recompense:.1f}")
 	if termine:
 		print("Crash !!")
 		break
