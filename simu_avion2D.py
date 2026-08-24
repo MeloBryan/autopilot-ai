@@ -4,6 +4,7 @@ import torch.nn as nn
 import torch.optim as optim
 import random
 import math
+import matplotlib.pyplot as plt
 from collections import deque
 
 class AvionEnv2D:
@@ -160,13 +161,31 @@ print("2D model saved to 'modele_avion_2d.pt'")
 print("\n--- 2D TEST FLIGHT ---")
 agent.epsilon = 0.0
 state = env.reset()
+
+history_x = [env.x]
+history_y = [env.y]
 for t in range(200):
 	action = agent.choisir_action(state)
 	next_state, reward, done = env.step(action)
 	state = next_state
+
+	history_x.append(env.x)
+	history_y.append(env.y)
 	if t % 20 == 0 or done:
 		dist = math.hypot(env.target_x - env.x, env.target_y - env.y)
 		print(f"t={t:03d}s | Pos: ({env.x:.0f}m, {env.y:.0f}m) | Angle: {math.degrees(env.angle):.1f}° | Target Dist: {dist:.0f}m")
 	if done:
 		print("Hit or End of Flight!")
 		break
+
+plt.figure(figsize=(10, 5))
+plt.plot(history_x, history_y, label="Aircraft trajectory", color='blue', linewidth=2)
+plt.scatter([env.target_x], [env.target_y], color='red', s=100, label="Target (Waypoint)", zorder=5)
+plt.axhline(0, color='black', linestyle='--', label="Ground")
+plt.title("Autopilot AI - 2D Flight Path")
+plt.xlabel("Horizontal distance X (m)")
+plt.ylabel("Altitude Y (m)")
+plt.grid(True)
+plt.legend()
+plt.savefig("trajectoire_vol.png")
+print("Graph saved as 'trajectoire_vol.png'")
