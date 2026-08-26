@@ -6,11 +6,23 @@ import random
 from collections import deque
 import matplotlib.pyplot as plt
 
+SEED = 42
+
+def set_seed(seed):
+	random.seed(seed)
+	np.random.seed(seed)
+	torch.manual_seed(seed)
+	if torch.cuda.is_available():
+		torch.cuda.manual_seed_all(seed)
+		torch.backends.cudnn.deterministic = True
+		torch.backends.cudnn.benchmark = False
+	torch.use_deterministic_algorithms(True)
+
 class Airplane3DEnv:
 	"""
 	3D Airplane Environment for Reinforcement Learning.
 	"""
-	def __init__(self, num_envs=16):
+	def __init__(self, num_envs=16, seed=None):
 		self.num_envs = num_envs
 		self.dt = 1.0
 		self.velocity = 50.0
@@ -18,11 +30,11 @@ class Airplane3DEnv:
 		self.waypoint_x_range = (1500.0, 9000.0)
 		self.waypoint_y_range = (-4000.0, 4000.0)
 		self.waypoint_z_range = (500.0, 4500.0)
-		self.waypoint_rng = np.random.default_rng()
+		self.waypoint_rng = np.random.default_rng(seed)
 		self._waypoints = np.zeros(
 			(self.num_envs, self.waypoint_count, 3), dtype=np.float32
 		)
-		self.waypoint_radius = 150.0
+		self.waypoint_radius = 250.0
 		self.max_steps = 500
 
 		self.x = np.zeros(num_envs, dtype=np.float32)
@@ -101,7 +113,7 @@ class Airplane3DEnv:
 		"""
 		Get the current states for all environments.
 		"""
-		states = np.zeros((self.num_envs, 9), dtype=np.float32)
+		states = np.zeros((self.num_envs, 10), dtype=np.float32)
 		for i in range(self.num_envs):
 			target_idx = min(self.current_wp_idx[i], self.waypoint_count - 1)
 			target = self._waypoints[i, target_idx]
@@ -123,10 +135,11 @@ class Airplane3DEnv:
 				dz / 5000.0,
 				dist_3d / 10000.0,
 				self.pitch[i],
-				self.yaw[i],
 				self.roll[i],
-				yaw_error,
-				pitch_error
+				np.sin(yaw_error),
+				np.cos(yaw_error),
+				np.sin(pitch_error),
+				np.cos(pitch_error)
 			], dtype=np.float32)
 
 		return states
@@ -140,15 +153,20 @@ class Airplane3DEnv:
 		dones = np.zeros(self.num_envs, dtype=bool)
 
 		for i in range(self.num_envs):
-			if actions[i] == 0:
-				self.roll[i] = max(-np.radians(30), self.roll[i] - np.radians(5))
-			elif actions[i] == 1:
-				self.roll[i] *= 0.5
-			elif actions[i] == 2:
-				self.roll[i] = min(np.radians(30), self.roll[i] + np.radians(5))
-			elif actions[i] == 3:
+			roll_change = (-1, 0, 1)[actions[i] % 3]
+			pitch_change = (-1, 0, 1)[actions[i] // 3]
+			if roll_change == -1:
+				self.roll[i] = max(-np.radians(25), self.roll[i] - np.radians(3))
+			elif roll_change == 0:
+				self.roll[i] = 0.0
+			else:
+				self.roll[i] = min(np.radians(25), self.roll[i] + np.radians(3))
+
+			if pitch_change == -1:
 				self.pitch[i] = max(-np.radians(20), self.pitch[i] - np.radians(3))
-			elif actions[i] == 4:
+			elif pitch_change == 0:
+				self.pitch[i] = 0.0
+			elif pitch_change == 1:
 				self.pitch[i] = min(np.radians(20), self.pitch[i] + np.radians(3))
 
 			g = 9.81
@@ -161,21 +179,23 @@ class Airplane3DEnv:
 			target_idx = min(self.current_wp_idx[i], self.waypoint_count - 1)
 			target = self._waypoints[i, target_idx]
 			dist_3d = np.linalg.norm(np.array([self.x[i], self.y[i], self.z[i]]) - target)
-			reward = (self.previous_distances[i] - dist_3d) / 100.0
+			distance_progress = (self.previous_distances[i] - dist_3d) / self.velocity
 			self.previous_distances[i] = dist_3d
 
-			state_curr = self._get_states()[i]
-			yaw_err = abs(state_curr[7])
-			pitch_err = abs(state_curr[8])
-			alignement_bonus = max(0.0, 1.0 - (yaw_err + pitch_err)) * 2.0
-			reward += alignement_bonus
+			reward = 2.0 * distance_progress - 0.02
+			if distance_progress < 0:
+				reward -= 0.1
+			reward -= 0.01 * (
+				abs(self.roll[i]) / np.radians(25)
+				+ abs(self.pitch[i]) / np.radians(20)
+			)
 
 			if dist_3d < self.waypoint_radius:
-				precision_bonus = (1.0 - (dist_3d / self.waypoint_radius)) * 500.0
-				reward += 500.0 + precision_bonus
+				precision_bonus = (1.0 - (dist_3d / self.waypoint_radius)) * 25.0
+				reward += 100.0 + precision_bonus
 				self.current_wp_idx[i] += 1
 				if self.current_wp_idx[i] >= self.waypoint_count:
-					reward += 1500.0
+					reward += 300.0
 					dones[i] = True
 				else:
 					next_target = self._waypoints[i, self.current_wp_idx[i]]
@@ -198,7 +218,7 @@ class Airplane3DEnv:
 
 class DQN3D(nn.Module):
 
-	def __init__(self, state_dim=9, action_dim=5):
+	def __init__(self, state_dim=9, action_dim=9):
 		super(DQN3D, self).__init__()
 		self.fc1 = nn.Linear(state_dim, 128)
 		self.fc2 = nn.Linear(128, 128)
@@ -215,17 +235,18 @@ class DQN3D(nn.Module):
 
 class DQNAgent3D:
 
-	def __init__(self, state_dim=9, action_dim=5, lr=1e-3, gamma=0.99, buffer_capacity=100000):
+	def __init__(self, state_dim=9, action_dim=9, lr=3e-4, gamma=0.99, buffer_capacity=500000):
 		self.state_dim = state_dim
 		self.action_dim = action_dim
 		self.gamma = gamma
 
 		self.epsilon = 1.0
 		self.epsilon_min = 0.05
-		self.epsilon_decay = 0.9995
+		self.epsilon_decay = 0.99999
 
 		self.memory = deque(maxlen=buffer_capacity)
 		self.batch_size = 128
+		self.learning_starts = 5000
 
 		if torch.cuda.is_available():
 			self.device = torch.device("cuda")
@@ -259,7 +280,7 @@ class DQNAgent3D:
 
 	def train_step(self):
 		"""Learning step using a sample from the Replay Buffer"""
-		if len(self.memory) < self.batch_size:
+		if len(self.memory) < self.learning_starts:
 			return None
 
 		batch = random.sample(self.memory, self.batch_size)
@@ -294,17 +315,43 @@ class DQNAgent3D:
 		"""Periodic update of the Target Network"""
 		self.target_net.load_state_dict(self.policy_net.state_dict())
 
-# --- TRAINING ---
-NUM_ENVS = 16
-env = Airplane3DEnv(num_envs=NUM_ENVS)
-agent = DQNAgent3D(state_dim=9, action_dim=5)
+def evaluate_agent(agent, evaluation_episodes=20, seed=SEED):
+	eval_env = Airplane3DEnv(num_envs=1, seed=seed)
+	validated_waypoints = []
+	successful_episodes = 0
 
-total_episodes_target = 10000
+	for _ in range(evaluation_episodes):
+		state = eval_env.reset_all()
+		done = False
+		while not done:
+			action = agent.select_actions(state, evaluate=True)[0]
+			next_state, _, done_array = eval_env.step(np.array([action]))
+			state = next_state
+			done = done_array[0]
+
+		waypoints_reached = int(eval_env.last_wp_idx[0])
+		validated_waypoints.append(waypoints_reached)
+		if waypoints_reached == eval_env.waypoint_count:
+			successful_episodes += 1
+
+	return successful_episodes / evaluation_episodes, np.mean(validated_waypoints)
+
+# --- TRAINING ---
+set_seed(SEED)
+NUM_ENVS = 16
+env = Airplane3DEnv(num_envs=NUM_ENVS, seed=SEED)
+agent = DQNAgent3D(state_dim=10, action_dim=9)
+
+total_episodes_target = 100000
 train_freq = 8
 target_update_freq = 50
 target_update_steps = 1000
+checkpoint_frequency = 1000
+checkpoint_evaluation_episodes = 100
 step_counter = 0
 completed_episodes = 0
+best_success_rate = -1.0
+best_average_waypoints = -1.0
 
 states = env.reset_all()
 
@@ -328,27 +375,54 @@ while completed_episodes < total_episodes_target:
 			completed_episodes += 1
 			if completed_episodes % target_update_freq == 0:
 				print(f"Completed Episodes: {completed_episodes}/{total_episodes_target}, Epsilon: {agent.epsilon:.4f}")
+			if completed_episodes % checkpoint_frequency == 0:
+				success_rate, average_waypoints = evaluate_agent(
+					agent,
+					evaluation_episodes=checkpoint_evaluation_episodes,
+					seed=SEED + 1
+				)
+				print(
+					f"Checkpoint evaluation: success={success_rate:.1%}, "
+					f"average waypoints={average_waypoints:.2f}/3"
+				)
+				torch.save(
+					agent.policy_net.state_dict(),
+					f"airplane_dqn_3D_checkpoint_{completed_episodes}.pt"
+				)
+				print(
+					f"Checkpoint saved as "
+					f"'airplane_dqn_3D_checkpoint_{completed_episodes}.pt'."
+				)
+				if (average_waypoints, success_rate) > (best_average_waypoints, best_success_rate):
+					best_success_rate = success_rate
+					best_average_waypoints = average_waypoints
+					torch.save(agent.policy_net.state_dict(), "airplane_dqn_3D_best.pt")
+					print("Best model saved as 'airplane_dqn_3D_best.pt'.")
 
 	states = next_states
 
 print("Training completed.")
+if best_success_rate >= 0.0:
+		agent.policy_net.load_state_dict(torch.load("airplane_dqn_3D_best.pt", map_location=agent.device))
 torch.save(agent.policy_net.state_dict(), "airplane_dqn_3D.pt")
-print("Trained model saved as 'airplane_dqn_3D.pt'.")
+print("Best trained model saved as 'airplane_dqn_3D.pt'.")
 
 # --- EVALUATION ---
 
 print("Starting evaluation of the trained agent.")
-eval_env = Airplane3DEnv(num_envs=1)
-evaluation_episodes = 20
+eval_env = Airplane3DEnv(num_envs=1, seed=SEED + 2)
+evaluation_episodes = 1000
 max_eval_steps = 1000
 successful_episodes = 0
 validated_waypoints = []
 trajectory_x = []
 trajectory_y = []
 trajectory_z = []
+trajectory_waypoints = None
 
 for episode in range(evaluation_episodes):
 	state = eval_env.reset_all()
+	episode_waypoints = np.array(eval_env.waypoints, copy=True)
 	episode_trajectory_x = [eval_env.x[0]]
 	episode_trajectory_y = [eval_env.y[0]]
 	episode_trajectory_z = [eval_env.z[0]]
@@ -373,6 +447,7 @@ for episode in range(evaluation_episodes):
 		trajectory_x = episode_trajectory_x
 		trajectory_y = episode_trajectory_y
 		trajectory_z = episode_trajectory_z
+		trajectory_waypoints = episode_waypoints
 
 print(
 	 f"Evaluation completed: {successful_episodes}/{evaluation_episodes} successful episodes, "
@@ -384,10 +459,11 @@ print(
 fig = plt.figure(figsize=(12, 8))
 ax = fig.add_subplot(111, projection='3d')
 ax.plot(trajectory_x, trajectory_y, trajectory_z, label='Airplane Trajectory', color='blue', linewidth=2)
-wp_coords = np.array(eval_env.waypoints)
+wp_coords = trajectory_waypoints
 ax.scatter(wp_coords[:, 0], wp_coords[:, 1], wp_coords[:, 2], color='red', s=120, label='Waypoints 3D', zorder=5)
+ax.plot(wp_coords[:, 0], wp_coords[:, 1], wp_coords[:, 2], color='red', linestyle='--', linewidth=1.5, label='Target Route')
 ax.scatter([0], [0], [1000], color='green', s=100, marker='^', label='Start Position', zorder=5)
-for i, (wx, wy, wz) in enumerate(eval_env.waypoints):
+for i, (wx, wy, wz) in enumerate(trajectory_waypoints):
 	ax.text(wx, wy, wz + 150, f"WP{i+1}\n({int(wx)}, {int(wy)}, {int(wz)})", color='black', fontsize=9, fontweight='bold', ha='center')
 ax.set_title('3D Airplane Trajectory', fontsize=14, fontweight='bold', pad=15)
 ax.set_xlabel('X Position', fontsize=12)
@@ -395,6 +471,12 @@ ax.set_ylabel('Y Position', fontsize=12)
 ax.set_zlabel('Z Position', fontsize=12)
 ax.legend(loc='upper left')
 ax.grid(True, linestyle='--', alpha=0.7)
+ax.set_box_aspect((
+	max(np.ptp(trajectory_x), np.ptp(wp_coords[:, 0]), 1.0),
+	max(np.ptp(trajectory_y), np.ptp(wp_coords[:, 1]), 1.0),
+	max(np.ptp(trajectory_z), np.ptp(wp_coords[:, 2]), 1.0)
+))
+ax.view_init(elev=25, azim=-60)
 
 plt.tight_layout()
 plt.savefig('airplane_trajectory_3D.png', dpi=300)
