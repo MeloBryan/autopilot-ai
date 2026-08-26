@@ -5,7 +5,7 @@ import torch.optim as optim
 import random
 from collections import deque
 
-class AvionEnv:
+class AirplaneEnv:
 	def __init__(self, altitude_cible=3000.0):
 		self.altitude_cible = altitude_cible
 		self.reset()

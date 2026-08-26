@@ -7,7 +7,7 @@ import math
 import matplotlib.pyplot as plt
 from collections import deque
 
-class AvionEnv2D:
+class AirplaneEnv2D:
 
 	def __init__(self, waypoints=None):
 		if waypoints is None:
